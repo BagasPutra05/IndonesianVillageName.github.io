@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Peta Desa Indonesia Raya</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; background-color: #f0f0f0; font-family: sans-serif; }
+        #map { height: 100vh; width: 100%; z-index: 1; }
+        
+        /* UI Styles */
+        .info-box { position: absolute; top: 10px; right: 10px; z-index: 1000; background: white; padding: 10px 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .search-box { position: absolute; top: 10px; left: 50px; z-index: 1000; background: white; padding: 10px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: flex; gap: 5px; }
+        input { padding: 8px; } button { padding: 8px; cursor: pointer; }
+
+        /* === PERBAIKAN LABEL DESA === */
+        .leaflet-tooltip.label-desa-style {
+            background-color: transparent;
+            border: none;
+            box-shadow: none;
+            /* Trik CSS agar label benar-benar di tengah titik pivot */
+            transform: translate(0, 0); 
+        }
+
+        .label-desa-text {
+            color: #333;
+            font-weight: 800; /* Lebih tebal */
+            font-size: 10px;  /* Ukuran pas */
+            text-align: center; /* Teks rata tengah */
+            white-space: normal; /* Izinkan teks turun ke bawah jika kepanjangan */
+            width: 100px;        /* Batasi lebar agar teks turun baris jika panjang */
+            display: block;
+            margin-left: -50px;  /* Geser kiri setengah lebar agar pas di tengah */
+            
+            /* Outline putih agar terbaca */
+            text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff;
+        }
+    </style>
+</head>
+<body>
+    <div class="search-box">
+        <input type="text" id="inputCari" placeholder="Cari Desa/Kecamatan..." onkeypress="cekEnter(event)">
+        <button onclick="cariDesa()">Cari</button>
+    </div>
+    <div class="info-box"><b>Total Data:</b> <span id="jumlahDesa">0</span> Desa</div>
+    <div id="map"></div>
+
+    <script src="db_desa.js"></script>
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script>
+        var map = L.map('map').setView([-2.5, 118], 5); 
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+        var layerDesa = {}; 
+        var group = new L.featureGroup();
+        var allTooltips = []; // Menyimpan referensi label untuk diatur nanti
+
+        function getRandomColor() {
+            var letters = '0123456789ABCDEF'; var color = '#';
+            for (var i = 0; i < 6; i++) { color += letters[Math.floor(Math.random() * 16)]; }
+            return color;
+        }
+
+        if (typeof dataSeluruhIndonesia !== 'undefined') {
+            document.getElementById('jumlahDesa').innerText = dataSeluruhIndonesia.length;
+            
+            dataSeluruhIndonesia.forEach(function(desa) {
+                var latlngs = desa.Koordinat.map(function(c) { return [parseFloat(c[0]), parseFloat(c[1])]; });
+
+                var polygon = L.polygon(latlngs, {
+                    color: "white", weight: 1, fillColor: "red", fillOpacity: 0.6
+                }).addTo(map);
+
+                // === LOGIKA LABEL BARU ===
+                // Label sekarang bisa turun baris (multiline) agar pas di kotak
+                var labelHtml = '<span class="label-desa-text">' + desa.Desa + '</span>';
+                
+                // Ikat tooltip tapi JANGAN dibuka dulu (openTooltip)
+                polygon.bindTooltip(labelHtml, {
+                    permanent: true,
+                    direction: "center",
+                    className: "label-desa-style",
+                    interactive: false // Agar label tidak menghalangi klik mouse
+                });
+
+                allTooltips.push(polygon); // Simpan ke list
+
+                // Popup Info Lengkap
+                var popupContent = `<b>${desa.Desa}</b><br>Kec. ${desa.Kecamatan}<br>Kab. ${desa.Kabupaten}<br>Prov. ${desa.Provinsi}`;
+                polygon.bindPopup(popupContent);
+                
+                group.addLayer(polygon);
+                layerDesa[desa.Desa.toLowerCase()] = polygon;
+            });
+
+            if (dataSeluruhIndonesia.length > 0) map.fitBounds(group.getBounds());
+        }
+
+        // === FITUR OTOMATIS SEMBUNYI/MUNCUL LABEL ===
+        // Masalah "menyebar" terjadi karena label muncul saat peta terlalu jauh.
+        // Kita atur agar label hanya muncul jika Zoom Level >= 13 (Cukup dekat)
+        
+        function updateLabels() {
+            var currentZoom = map.getZoom();
+            var shouldShow = currentZoom >= 13; // Atur angka ini sesuai selera (12-15)
+
+            allTooltips.forEach(function(poly) {
+                if (shouldShow) {
+                    poly.openTooltip(); // Tampilkan jika zoom dekat
+                } else {
+                    poly.closeTooltip(); // Sembunyikan jika zoom jauh
+                }
+            });
+        }
+
+        // Dengar event saat user zoom in/out
+        map.on('zoomend', updateLabels);
+        
+        // Jalankan sekali di awal
+        updateLabels();
+
+        // --- Logika Pencarian ---
+        function cariDesa() {
+            var input = document.getElementById('inputCari').value.trim().toLowerCase();
+            if (layerDesa[input]) {
+                map.flyToBounds(layerDesa[input].getBounds(), { padding: [50, 50], duration: 1.5 });
+                // Paksa label muncul saat dicari meskipun zoom masih jauh
+                setTimeout(function(){ layerDesa[input].openTooltip(); layerDesa[input].openPopup(); }, 1500);
+            }
+        }
+        function cekEnter(e) { if (e.keyCode === 13) { cariDesa(); } }
+    </script>
+</body>
+</html>
