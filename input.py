@@ -4,24 +4,22 @@ import re
 import time
 import pyperclip 
 
-# --- KONFIGURASI TAHAP 2 ---
+# --- KONFIGURASI TAHAP 2 (SMART LOADING) ---
 ROOT_FOLDER = "Data_Indonesia"
-FOLDER_OUTPUT = "Database_Pecahan"  # Folder penyimpanan file JS kecil
-FILE_INDEX = "spatial_index.js"     # Peta Harta Karun (Index Lokasi)
+FOLDER_OUTPUT = "Database_Pecahan"
+FILE_INDEX = "spatial_index.js"
 
 def bersihkan_teks(teks):
     bersih = re.sub(r'[^\w\s]', '', teks).strip()
     return bersih.replace(" ", "_").lower()
 
 # ==========================================
-# LOGIKA UPDATE DATABASE (SMART SPLIT)
+# LOGIKA DATABASE (SMART SPLIT)
 # ==========================================
 def update_database_smart():
-    print(f"   [AUTO-UPDATE] Menyusun Index Pintar (Tahap 2)...", end=" ")
-    
+    print(f"   [AUTO-UPDATE] Menyusun Index Spatial...", end=" ")
     pengelompokan = {}
     
-    # 1. Scan & Kelompokkan Data per Kecamatan
     for root, dirs, files in os.walk(ROOT_FOLDER):
         for filename in files:
             if filename.endswith(".json"):
@@ -30,101 +28,106 @@ def update_database_smart():
                     with open(path_lengkap, 'r') as f:
                         data = json.load(f)
                         if all(k in data for k in ("Koordinat", "Kecamatan", "Kabupaten")):
-                            
-                            # Kunci Unik: tuban_bangilan
-                            kab_clean = bersihkan_teks(data['Kabupaten'])
-                            kec_clean = bersihkan_teks(data['Kecamatan'])
-                            key = f"{kab_clean}_{kec_clean}"
-                            
+                            key = f"{bersihkan_teks(data['Kabupaten'])}_{bersihkan_teks(data['Kecamatan'])}"
                             if key not in pengelompokan:
                                 pengelompokan[key] = {
-                                    "kabupaten": data['Kabupaten'],
-                                    "kecamatan": data['Kecamatan'],
-                                    "desa_list": [],
-                                    # Variabel untuk menghitung kotak batas (bounding box) kecamatan
-                                    "min_lat": 90, "max_lat": -90, 
-                                    "min_lng": 180, "max_lng": -180
+                                    "kabupaten": data['Kabupaten'], "kecamatan": data['Kecamatan'], "desa_list": [],
+                                    "min_lat": 90, "max_lat": -90, "min_lng": 180, "max_lng": -180
                                 }
                             
-                            # Update Bounding Box Kecamatan
-                            # Kita cari titik paling ujung utara/selatan/barat/timur dari kecamatan ini
+                            # Hitung batas wilayah (bounding box)
                             for coord in data['Koordinat']:
                                 lat, lng = float(coord[0]), float(coord[1])
                                 if lat < pengelompokan[key]["min_lat"]: pengelompokan[key]["min_lat"] = lat
                                 if lat > pengelompokan[key]["max_lat"]: pengelompokan[key]["max_lat"] = lat
                                 if lng < pengelompokan[key]["min_lng"]: pengelompokan[key]["min_lng"] = lng
                                 if lng > pengelompokan[key]["max_lng"]: pengelompokan[key]["max_lng"] = lng
-
+                            
                             pengelompokan[key]["desa_list"].append(data)
                 except: pass 
 
-    # 2. Buat File Pecahan & Index Spatial
     if not os.path.exists(FOLDER_OUTPUT): os.makedirs(FOLDER_OUTPUT)
-    
     spatial_index = []
 
     for key, info in pengelompokan.items():
-        # Nama file pecahan
         nama_file = f"db_{key}.js"
-        path_out = os.path.join(FOLDER_OUTPUT, nama_file)
-        
-        # Simpan file JS kecil
         isi_js = f"terimaDataPecahan({json.dumps(info['desa_list'], indent=None)});"
-        with open(path_out, 'w') as f:
-            f.write(isi_js)
+        with open(os.path.join(FOLDER_OUTPUT, nama_file), 'w') as f: f.write(isi_js)
 
-        # Catat di Index: "Kecamatan A ada di koordinat sekian, filenya ini."
         spatial_index.append({
-            "file": nama_file,
-            "kecamatan": info['kecamatan'],
-            "kabupaten": info['kabupaten'],
-            # Simpan kotak batas agar HTML tau kapan harus memuat file ini
-            "bounds": [
-                [info["min_lat"], info["min_lng"]], # Sudut Kiri Bawah
-                [info["max_lat"], info["max_lng"]]  # Sudut Kanan Atas
-            ]
+            "file": nama_file, "kecamatan": info['kecamatan'], "kabupaten": info['kabupaten'],
+            "bounds": [[info["min_lat"], info["min_lng"]], [info["max_lat"], info["max_lng"]]]
         })
 
-    # Simpan Index Utama
     with open(FILE_INDEX, 'w') as f:
         f.write(f"var spatialIndex = {json.dumps(spatial_index, indent=None)};")
-
-    print(f"SELESAI! ({len(spatial_index)} Kecamatan) ✅")
+    print(f"SELESAI! ✅")
 
 # ==========================================
-# INPUT (REKAM GAMBAR / MANUAL)
+# LOGIKA INPUT HYBRID (MANUAL + OTOMATIS)
 # ==========================================
-def rekam_koordinat_pintar():
-    print("\n   [STANDBY] Menunggu Copy Koordinat (Editor / Manual)...")
+def rekam_koordinat_hybrid():
+    print("\n   [MODE INPUT AKTIF]")
+    print("   1. Jika Copy Polygon (Editor) -> Otomatis Simpan.")
+    print("   2. Jika Copy Manual (Maps)    -> Ditampung dulu.")
+    print("   >> TEKAN 'Ctrl + C' JIKA SUDAH SELESAI INPUT MANUAL.")
+    
+    list_manual = []
     pyperclip.copy("") 
     last_paste = ""
+
     try:
         while True:
             current = pyperclip.paste()
+            
             if current != last_paste and current.strip() != "":
-                # Deteksi Multi-line (Dari Editor)
-                if "\n" in current or len(current.split(',')) > 3:
-                    print("   [DETEKSI] Data Polygon Masuk!")
+                
+                # --- KASUS A: DETEKSI POLYGON (EDITOR) ---
+                # Ciri: Ada baris baru (\n) ATAU komanya banyak sekali
+                if "\n" in current or current.count(',') > 3:
+                    print("   [DETEKSI] Data Polygon Editor! Langsung proses...")
                     coords = []
                     for line in current.split('\n'):
                         if "," in line:
                             parts = line.split(',')
-                            if len(parts) >= 2:
-                                try: coords.append([parts[0].strip(), parts[1].strip()])
-                                except: pass
-                    if len(coords) > 2: return coords
-                last_paste = current
-            time.sleep(0.5)
-    except KeyboardInterrupt: return None
+                            try: coords.append([parts[0].strip(), parts[1].strip()])
+                            except: pass
+                    if len(coords) > 2: 
+                        return coords # Langsung kembali (Auto Save)
+                
+                # --- KASUS B: DETEKSI MANUAL (SATU TITIK) ---
+                # Ciri: Hanya ada satu koma, dan isinya angka
+                elif "," in current:
+                    parts = current.split(',')
+                    if len(parts) >= 2:
+                        lat = parts[0].strip()
+                        lng = parts[1].strip()
+                        # Validasi angka sederhana
+                        if any(c.isdigit() for c in lat):
+                            list_manual.append([lat, lng])
+                            print(f"      [+] Titik Manual ke-{len(list_manual)}: {lat}, {lng}")
 
+                last_paste = current
+            
+            time.sleep(0.5)
+            
+    except KeyboardInterrupt:
+        # User menekan Ctrl+C, artinya input manual selesai
+        if len(list_manual) > 0:
+            print(f"\n   [OK] {len(list_manual)} titik manual dikumpulkan.")
+            return list_manual
+        else:
+            return None
+
+# ==========================================
+# MAIN LOOP
+# ==========================================
 def main():
     print("="*60)
-    print("  INPUT TAHAP 2: SMART LOADING SYSTEM")
-    print("  (Database dipecah + Index Pintar)")
+    print("  INPUT HYBRID (AUTO + MANUAL)")
     print("="*60)
     
-    # Update awal untuk migrasi data lama
-    update_database_smart()
+    update_database_smart() # Update awal
 
     while True:
         try:
@@ -138,8 +141,11 @@ def main():
 
             if not (provinsi and desa): continue
 
-            coords = rekam_koordinat_pintar()
-            if not coords: print("Batal."); continue
+            # Masuk ke fungsi Hybrid
+            coords = rekam_koordinat_hybrid()
+            
+            if not coords: 
+                print("Dibatalkan."); continue
 
             path_folder = os.path.join(ROOT_FOLDER, bersihkan_teks(provinsi), bersihkan_teks(kabupaten), bersihkan_teks(kecamatan))
             os.makedirs(path_folder, exist_ok=True)
@@ -151,7 +157,9 @@ def main():
             print(f"\n[SUKSES] Desa {desa} tersimpan.")
             update_database_smart()
             
-        except KeyboardInterrupt: break
+        except KeyboardInterrupt:
+            print("\nKeluar program.")
+            break
 
 if __name__ == "__main__":
     main()
