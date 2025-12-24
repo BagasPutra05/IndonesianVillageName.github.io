@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Peta Desa Indonesia Raya</title>
+    <title>Peta Desa Indonesia (Smart Load)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
     <style>
@@ -9,126 +9,165 @@
         #map { height: 100vh; width: 100%; z-index: 1; }
         
         /* UI Styles */
-        .info-box { position: absolute; top: 10px; right: 10px; z-index: 1000; background: white; padding: 10px 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
-        .search-box { position: absolute; top: 10px; left: 50px; z-index: 1000; background: white; padding: 10px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: flex; gap: 5px; }
-        input { padding: 8px; } button { padding: 8px; cursor: pointer; }
+        .search-box { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000; background: white; padding: 8px 15px; border-radius: 50px; box-shadow: 0 4px 6px rgba(0,0,0,0.2); display: flex; gap: 5px; width: 90%; max-width: 400px; }
+        input { border: none; outline: none; flex-grow: 1; padding: 8px; }
+        button { background-color: #007bff; color: white; border: none; border-radius: 20px; padding: 8px 20px; cursor: pointer; font-weight: bold; }
+        
+        .info-status { position: absolute; bottom: 20px; left: 20px; z-index: 1000; background: white; padding: 5px 10px; border-radius: 5px; font-size: 11px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
 
-        /* === PERBAIKAN LABEL DESA === */
-        .leaflet-tooltip.label-desa-style {
-            background-color: transparent;
-            border: none;
-            box-shadow: none;
-            /* Trik CSS agar label benar-benar di tengah titik pivot */
-            transform: translate(0, 0); 
-        }
-
-        .label-desa-text {
-            color: #333;
-            font-weight: 800; /* Lebih tebal */
-            font-size: 10px;  /* Ukuran pas */
-            text-align: center; /* Teks rata tengah */
-            white-space: normal; /* Izinkan teks turun ke bawah jika kepanjangan */
-            width: 100px;        /* Batasi lebar agar teks turun baris jika panjang */
-            display: block;
-            margin-left: -50px;  /* Geser kiri setengah lebar agar pas di tengah */
-            
-            /* Outline putih agar terbaca */
-            text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff;
-        }
+        /* LABEL STYLE */
+        .leaflet-tooltip.label-desa-style { background: transparent; border: none; box-shadow: none; }
+        .label-desa-text { color: #000; font-weight: 800; font-size: 10px; text-align: center; white-space: normal; width: 100px; display: block; margin-left: -50px; text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff; transform: translate(0, 0); }
+        .mode-bersih .label-desa-style { display: none !important; }
     </style>
 </head>
 <body>
+
     <div class="search-box">
         <input type="text" id="inputCari" placeholder="Cari Desa/Kecamatan..." onkeypress="cekEnter(event)">
         <button onclick="cariDesa()">Cari</button>
     </div>
-    <div class="info-box"><b>Total Data:</b> <span id="jumlahDesa">0</span> Desa</div>
-    <div id="map"></div>
+    
+    <div class="info-status">
+        Loaded: <span id="countKec">0</span> Kec | <span id="countDesa">0</span> Desa
+    </div>
 
-    <script src="db_desa.js"></script>
+    <div id="map" class="mode-bersih"></div>
+
     <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    
+    <script src="spatial_index.js"></script>
+
     <script>
-        var map = L.map('map').setView([-2.5, 118], 5); 
+        var map = L.map('map').setView([-7.0, 112.0], 9); // View Awal Jawa Timur
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
-        var layerDesa = {}; 
-        var group = new L.featureGroup();
-        var allTooltips = []; // Menyimpan referensi label untuk diatur nanti
+        var layerGroup = new L.featureGroup().addTo(map);
+        var loadedFiles = []; // Mencatat file apa saja yang sudah dimuat
+        var searchIndex = {}; // Untuk pencarian
+        var totalDesa = 0;
 
         function getRandomColor() {
-            var letters = '0123456789ABCDEF'; var color = '#';
-            for (var i = 0; i < 6; i++) { color += letters[Math.floor(Math.random() * 16)]; }
-            return color;
+            var l='0123456789ABCDEF'; var c='#'; for(var i=0;i<6;i++)c+=l[Math.floor(Math.random()*16)]; return c;
         }
 
-        if (typeof dataSeluruhIndonesia !== 'undefined') {
-            document.getElementById('jumlahDesa').innerText = dataSeluruhIndonesia.length;
-            
-            dataSeluruhIndonesia.forEach(function(desa) {
-                var latlngs = desa.Koordinat.map(function(c) { return [parseFloat(c[0]), parseFloat(c[1])]; });
-
+        // --- FUNGSI 1: MENERIMA DATA DARI FILE PECAHAN ---
+        window.terimaDataPecahan = function(listDesa) {
+            listDesa.forEach(function(desa) {
+                var latlngs = desa.Koordinat.map(c => [parseFloat(c[0]), parseFloat(c[1])]);
                 var polygon = L.polygon(latlngs, {
-                    color: "white", weight: 1, fillColor: "red", fillOpacity: 0.6
-                }).addTo(map);
-
-                // === LOGIKA LABEL BARU ===
-                // Label sekarang bisa turun baris (multiline) agar pas di kotak
-                var labelHtml = '<span class="label-desa-text">' + desa.Desa + '</span>';
-                
-                // Ikat tooltip tapi JANGAN dibuka dulu (openTooltip)
-                polygon.bindTooltip(labelHtml, {
-                    permanent: true,
-                    direction: "center",
-                    className: "label-desa-style",
-                    interactive: false // Agar label tidak menghalangi klik mouse
+                    color: "white", weight: 1, fillColor: getRandomColor(), fillOpacity: 0.6
                 });
 
-                allTooltips.push(polygon); // Simpan ke list
-
-                // Popup Info Lengkap
-                var popupContent = `<b>${desa.Desa}</b><br>Kec. ${desa.Kecamatan}<br>Kab. ${desa.Kabupaten}<br>Prov. ${desa.Provinsi}`;
-                polygon.bindPopup(popupContent);
+                var labelHtml = '<span class="label-desa-text">' + desa.Desa + '</span>';
+                polygon.bindTooltip(labelHtml, { permanent: true, direction: "center", className: "label-desa-style", interactive: false });
                 
-                group.addLayer(polygon);
-                layerDesa[desa.Desa.toLowerCase()] = polygon;
+                var popup = `<b>${desa.Desa}</b><br>Kec. ${desa.Kecamatan}<br>Kab. ${desa.Kabupaten}`;
+                polygon.bindPopup(popup);
+
+                polygon.on('mouseover', function() { this.setStyle({weight:3, fillOpacity:0.9}); this.openTooltip(); });
+                polygon.on('mouseout', function() { this.setStyle({weight:1, fillOpacity:0.6}); });
+
+                layerGroup.addLayer(polygon);
+                
+                // Simpan ke index pencarian
+                var key = desa.Desa.toLowerCase();
+                if(!searchIndex[key]) searchIndex[key] = [];
+                searchIndex[key].push(polygon);
+                searchIndex[desa.Kecamatan.toLowerCase()] = []; // Simpan nama kec juga
+                
+                totalDesa++;
             });
+            document.getElementById('countDesa').innerText = totalDesa;
+            
+            // Cek label sekali
+            checkZoomLabel();
+        };
 
-            if (dataSeluruhIndonesia.length > 0) map.fitBounds(group.getBounds());
-        }
+        // --- FUNGSI 2: SMART LOADER (INTI TAHAP 2) ---
+        function checkAndLoadData() {
+            if (typeof spatialIndex === 'undefined') return;
 
-        // === FITUR OTOMATIS SEMBUNYI/MUNCUL LABEL ===
-        // Masalah "menyebar" terjadi karena label muncul saat peta terlalu jauh.
-        // Kita atur agar label hanya muncul jika Zoom Level >= 13 (Cukup dekat)
-        
-        function updateLabels() {
-            var currentZoom = map.getZoom();
-            var shouldShow = currentZoom >= 13; // Atur angka ini sesuai selera (12-15)
+            var mapBounds = map.getBounds(); // Batas layar saat ini
+            var loadedCount = 0;
 
-            allTooltips.forEach(function(poly) {
-                if (shouldShow) {
-                    poly.openTooltip(); // Tampilkan jika zoom dekat
-                } else {
-                    poly.closeTooltip(); // Sembunyikan jika zoom jauh
+            spatialIndex.forEach(function(area) {
+                // Konversi bounds area dari JSON ke Leaflet Bounds
+                var areaBounds = L.latLngBounds(area.bounds[0], area.bounds[1]);
+
+                // Logika: Apakah kotak kecamatan ini bersentuhan dengan layar kita?
+                if (mapBounds.intersects(areaBounds)) {
+                    
+                    // Jika YA, dan belum pernah dimuat, LOAD SEKARANG!
+                    if (!loadedFiles.includes(area.file)) {
+                        console.log("Memuat area: " + area.kecamatan);
+                        
+                        var script = document.createElement('script');
+                        script.src = 'Database_Pecahan/' + area.file;
+                        document.head.appendChild(script);
+                        
+                        loadedFiles.push(area.file);
+                    }
+                    loadedCount++;
                 }
             });
+            document.getElementById('countKec').innerText = loadedCount;
         }
 
-        // Dengar event saat user zoom in/out
-        map.on('zoomend', updateLabels);
+        // --- EVENT LISTENER ---
+        // Jalankan pengecekan setiap kali peta digeser atau di-zoom
+        map.on('moveend', checkAndLoadData);
         
         // Jalankan sekali di awal
-        updateLabels();
+        setTimeout(checkAndLoadData, 1000);
 
-        // --- Logika Pencarian ---
+
+        // --- FITUR ZOOM LABEL (Sama seperti sebelumnya) ---
+        function checkZoomLabel() {
+            var z = map.getZoom();
+            if(z < 13) document.getElementById('map').classList.add('mode-bersih');
+            else document.getElementById('map').classList.remove('mode-bersih');
+        }
+        map.on('zoomend', checkZoomLabel);
+
+        // --- PENCARIAN ---
         function cariDesa() {
-            var input = document.getElementById('inputCari').value.trim().toLowerCase();
-            if (layerDesa[input]) {
-                map.flyToBounds(layerDesa[input].getBounds(), { padding: [50, 50], duration: 1.5 });
-                // Paksa label muncul saat dicari meskipun zoom masih jauh
-                setTimeout(function(){ layerDesa[input].openTooltip(); layerDesa[input].openPopup(); }, 1500);
+            var val = document.getElementById('inputCari').value.trim().toLowerCase();
+            
+            // Coba cari di memori dulu
+            if (searchIndex[val]) {
+                 zoomTo(searchIndex[val]);
+            } else {
+                // Jika tidak ketemu, cari di Spatial Index (Mungkin datanya belum dimuat)
+                var foundInIndex = spatialIndex.find(k => k.kecamatan.toLowerCase() === val || k.kabupaten.toLowerCase() === val);
+                
+                if (foundInIndex) {
+                    // Paksa load file-nya dulu
+                    var s = document.createElement('script');
+                    s.src = 'Database_Pecahan/' + foundInIndex.file;
+                    s.onload = function() {
+                         // Setelah loaded, coba cari lagi
+                         alert("Data " + val + " baru saja dimuat. Klik Cari sekali lagi.");
+                    };
+                    document.head.appendChild(s);
+                    loadedFiles.push(foundInIndex.file);
+                    
+                    // Zoom ke area tersebut
+                    var b = L.latLngBounds(foundInIndex.bounds[0], foundInIndex.bounds[1]);
+                    map.flyToBounds(b);
+                } else {
+                    alert("Tidak ditemukan.");
+                }
             }
         }
-        function cekEnter(e) { if (e.keyCode === 13) { cariDesa(); } }
+        
+        function zoomTo(layers) {
+            var group = L.featureGroup(layers);
+            map.flyToBounds(group.getBounds());
+            setTimeout(() => { if(map.getZoom()<14) map.setZoom(14); }, 1500);
+        }
+        function cekEnter(e) { if(e.keyCode === 13) cariDesa(); }
+
     </script>
 </body>
 </html>
